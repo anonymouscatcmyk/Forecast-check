@@ -31,6 +31,13 @@ from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 
+# Optional: cloudscraper is more reliable against SuperJS / bot checks.
+try:
+    import cloudscraper
+    _HAS_CLOUDSCRAPER = True
+except ImportError:
+    _HAS_CLOUDSCRAPER = False
+
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 ARCHIVE = ROOT / "archive"
@@ -44,9 +51,24 @@ URLS = {
 MAP_URL = "https://info.meteo.bg/i/meteo/png/0/PrognozaBG_{n}.png"  # 1 = tomorrow
 LEADS = (1,)  # days ahead to collect: next-day forecast only
 STRINGMETEO_URL = "https://www.stringmeteo.com/synop/maxmin_month.php?month={m}&year={y}"
+
+# Browser-like headers (needed for Stringmeteo SuperJS check)
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; forecast-check/1.0)",
-    "Accept-Language": "bg,en;q=0.8",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/130.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "bg-BG,bg;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
 }
 
 # Station id -> where its forecast comes from and its name on Stringmeteo.
@@ -78,6 +100,28 @@ MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct
 
 # ---------------------------------------------------------------- download
 
+_SESSION = None
+
+
+def _make_session():
+    """Create a session that can pass simple SuperJS / bot checks."""
+    if _HAS_CLOUDSCRAPER:
+        s = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        )
+    else:
+        s = requests.Session()
+    s.headers.update(HEADERS)
+    return s
+
+
+def get_session():
+    global _SESSION
+    if _SESSION is None:
+        _SESSION = _make_session()
+    return _SESSION
+
+
 def decode(raw: bytes, header_charset: str | None) -> str:
     """Decode a page: charset from the HTTP header, else from the page's own
     <meta> tag, else UTF-8, else Windows-1251 (common on Bulgarian sites)."""
@@ -101,7 +145,7 @@ def fetch_html(name: str, url: str, offline: Path | None) -> str:
         return decode((offline / f"{name}.html").read_bytes(), None)
     # meteo.bg answers these pages with HTTP 404 but a full page, so the
     # status code is not checked; the parsers check that a table is there.
-    r = requests.get(url, headers=HEADERS, timeout=60)
+    r = get_session().get(url, timeout=60)
     m = re.search(r"charset=([\w-]+)", r.headers.get("Content-Type", ""))
     print(f"{name}: HTTP {r.status_code}, {len(r.content)} bytes, {r.headers.get('Content-Type')}")
     return decode(r.content, m.group(1) if m else None)
@@ -111,7 +155,7 @@ def fetch_map(n: int) -> bytes | None:
     # The image is only served with a meteo.bg referer.
     h = dict(HEADERS, Referer="https://meteo.bg/bg/forecast/dnesUtre")
     try:
-        r = requests.get(MAP_URL.format(n=n), headers=h, timeout=60)
+        r = get_session().get(MAP_URL.format(n=n), headers=h, timeout=60)
     except requests.RequestException as e:
         print(f"map {n}: {e}")
         return None
@@ -307,6 +351,12 @@ def fill_observations(today: dt.date, days: list[dict], offline: Path | None) ->
     for ym in months:
         y, m = map(int, ym.split("-"))
         html = fetch_html("stringmeteo", STRINGMETEO_URL.format(m=m, y=y), offline)
+        # Quick guard against SuperJS challenge / empty replies
+        if "SuperJS" in html or len(html) < 2000:
+            raise RuntimeError(
+                "Stringmeteo returned a challenge / empty page instead of data. "
+                "Install cloudscraper (`pip install cloudscraper`) or update headers."
+            )
         pages[ym] = parse_stringmeteo(html)
     obs_rows = []
     for e in pending:
