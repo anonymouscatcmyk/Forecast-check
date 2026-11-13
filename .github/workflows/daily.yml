@@ -1,0 +1,66 @@
+name: Daily NIMH forecast capture
+
+on:
+  schedule:
+    # Runs at 13:30 Sofia time all year. GitHub schedules are in UTC, so there
+    # are two entries and the first step keeps only the one that matches the
+    # current Sofia clock (winter UTC+2, summer UTC+3).
+    - cron: "30 11 * * *"   # 13:30 in winter
+    - cron: "30 10 * * *"   # 13:30 in summer
+  workflow_dispatch: {}     # adds a "Run workflow" button on the Actions tab
+
+permissions:
+  contents: write           # lets the job commit the new data back to the repository
+
+concurrency:
+  group: daily-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Is this the 13:30 Sofia run?
+        id: when
+        run: |
+          offset=$(TZ=Europe/Sofia date +%z)   # +0200 in winter, +0300 in summer
+          run=no
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then run=yes; fi
+          if [ "${{ github.event.schedule }}" = "30 11 * * *" ] && [ "$offset" = "+0200" ]; then run=yes; fi
+          if [ "${{ github.event.schedule }}" = "30 10 * * *" ] && [ "$offset" = "+0300" ]; then run=yes; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "Sofia offset $offset, run=$run"
+
+      - uses: actions/checkout@v4
+        if: steps.when.outputs.run == 'yes'
+
+      - uses: actions/setup-python@v5
+        if: steps.when.outputs.run == 'yes'
+        with:
+          python-version: "3.12"
+
+      - name: Install packages
+        if: steps.when.outputs.run == 'yes'
+        run: pip install -r requirements.txt pytest
+
+      - name: Check the parsers on the saved pages
+        if: steps.when.outputs.run == 'yes'
+        run: python -m pytest -q tests
+
+      - name: Collect forecasts and observations
+        if: steps.when.outputs.run == 'yes'
+        run: python scripts/collect.py
+
+      - name: Save the results to the repository
+        if: steps.when.outputs.run == 'yes'
+        run: |
+          git config user.name "forecast-bot"
+          git config user.email "forecast-bot@users.noreply.github.com"
+          git add data archive
+          if git diff --cached --quiet; then
+            echo "Nothing new."
+          else
+            git commit -m "Data for $(TZ=Europe/Sofia date +%F)"
+            git push
+          fi
