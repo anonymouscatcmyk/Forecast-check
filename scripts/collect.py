@@ -76,6 +76,8 @@ STATIONS = {
     "plovdiv": {"src": ("gradove", "Пловдив"), "obs": "Пловдив"},
     "sandanski": {"src": ("gradove", "Сандански"), "obs": "Сандански"},
     "kardzhali": {"src": ("gradove", "Кърджали"), "obs": "Кърджали"},
+    "vratsa": {"src": ("gradove", "Враца"), "obs": "Враца"},
+    "sliven": {"src": ("gradove", "Сливен"), "obs": "Сливен"},
     "botev": {"src": ("planini", "вр. Ботев"), "obs": "вр. Ботев"},
     "murgash": {"src": ("planini", "вр. Мургаш"), "obs": "вр. Мургаш"},
     "cherni": {"src": ("planini", "Черни връх"), "obs": "Черни вр."},
