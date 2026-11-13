@@ -31,13 +31,6 @@ from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 
-# Optional: cloudscraper is more reliable against SuperJS / bot checks.
-try:
-    import cloudscraper
-    _HAS_CLOUDSCRAPER = True
-except ImportError:
-    _HAS_CLOUDSCRAPER = False
-
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 ARCHIVE = ROOT / "archive"
@@ -52,7 +45,6 @@ MAP_URL = "https://info.meteo.bg/i/meteo/png/0/PrognozaBG_{n}.png"  # 1 = tomorr
 LEADS = (1,)  # days ahead to collect: next-day forecast only
 STRINGMETEO_URL = "https://www.stringmeteo.com/synop/maxmin_month.php?month={m}&year={y}"
 
-# Browser-like headers (needed for Stringmeteo SuperJS check)
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -72,7 +64,6 @@ HEADERS = {
 }
 
 # Station id -> where its forecast comes from and its name on Stringmeteo.
-# "src" is the meteo.bg table and the row name in it.
 STATIONS = {
     "vidin": {"src": ("gradove", "Видин"), "obs": "Видин"},
     "pleven": {"src": ("gradove", "Плевен"), "obs": "Плевен"},
@@ -100,25 +91,14 @@ MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct
 
 # ---------------------------------------------------------------- download
 
-_SESSION = None
+_SESSION: requests.Session | None = None
 
 
-def _make_session():
-    """Create a session that can pass simple SuperJS / bot checks."""
-    if _HAS_CLOUDSCRAPER:
-        s = cloudscraper.create_scraper(
-            browser={"browser": "chrome", "platform": "windows", "mobile": False}
-        )
-    else:
-        s = requests.Session()
-    s.headers.update(HEADERS)
-    return s
-
-
-def get_session():
+def get_session() -> requests.Session:
     global _SESSION
     if _SESSION is None:
-        _SESSION = _make_session()
+        _SESSION = requests.Session()
+        _SESSION.headers.update(HEADERS)
     return _SESSION
 
 
@@ -140,15 +120,71 @@ def decode(raw: bytes, header_charset: str | None) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def solve_superjs(session: requests.Session, challenge_html: str, original_url: str) -> bool:
+    """Solve Stringmeteo's SuperJS challenge and set the session cookie.
+
+    Returns True if the challenge was solved (or was not present).
+    """
+    if "SuperJS" not in challenge_html and "__SUPERJS_TARGET__" not in challenge_html:
+        return True  # not a challenge page
+
+    m = re.search(r'__SUPERJS_TARGET__\s*=\s*"([^"]+)"', challenge_html)
+    if not m:
+        return False
+    target = m.group(1).replace("\\/", "/")
+
+    # The JS challenge only checks:
+    #   calc_ok  = sum(1..5000) == 12502500
+    #   canvas_ok, mouse_moved, plugins_len
+    calc_ok = sum(range(1, 5001)) == 12502500
+    payload = {
+        "url": target,
+        "calc_ok": calc_ok,
+        "plugins_len": 5,
+        "canvas_ok": True,
+        "mouse_moved": True,
+    }
+    r = session.post(
+        "https://www.stringmeteo.com/__superjs/signal",
+        json=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Origin": "https://www.stringmeteo.com",
+            "Referer": original_url,
+        },
+        timeout=30,
+    )
+    if r.status_code != 200:
+        return False
+    try:
+        data = r.json()
+    except Exception:
+        return False
+    return bool(data.get("ok") and data.get("allowed"))
+
+
 def fetch_html(name: str, url: str, offline: Path | None) -> str:
     if offline:
         return decode((offline / f"{name}.html").read_bytes(), None)
-    # meteo.bg answers these pages with HTTP 404 but a full page, so the
-    # status code is not checked; the parsers check that a table is there.
-    r = get_session().get(url, timeout=60)
+
+    session = get_session()
+    r = session.get(url, timeout=60, allow_redirects=True)
+    html = decode(r.content, None)
+
+    # Stringmeteo serves a SuperJS challenge to non-browser clients.
+    if name == "stringmeteo" and ("SuperJS" in html or len(r.content) < 2000):
+        if not solve_superjs(session, html, r.url):
+            raise RuntimeError(
+                "Stringmeteo SuperJS challenge could not be solved. "
+                f"Got {len(r.content)} bytes from {r.url}"
+            )
+        # Retry the original URL with the session cookies set by the challenge.
+        r = session.get(url, timeout=60)
+        html = decode(r.content, None)
+
     m = re.search(r"charset=([\w-]+)", r.headers.get("Content-Type", ""))
     print(f"{name}: HTTP {r.status_code}, {len(r.content)} bytes, {r.headers.get('Content-Type')}")
-    return decode(r.content, m.group(1) if m else None)
+    return html
 
 
 def fetch_map(n: int) -> bytes | None:
@@ -351,12 +387,6 @@ def fill_observations(today: dt.date, days: list[dict], offline: Path | None) ->
     for ym in months:
         y, m = map(int, ym.split("-"))
         html = fetch_html("stringmeteo", STRINGMETEO_URL.format(m=m, y=y), offline)
-        # Quick guard against SuperJS challenge / empty replies
-        if "SuperJS" in html or len(html) < 2000:
-            raise RuntimeError(
-                "Stringmeteo returned a challenge / empty page instead of data. "
-                "Install cloudscraper (`pip install cloudscraper`) or update headers."
-            )
         pages[ym] = parse_stringmeteo(html)
     obs_rows = []
     for e in pending:
