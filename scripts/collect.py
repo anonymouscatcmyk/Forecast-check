@@ -78,14 +78,33 @@ MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct
 
 # ---------------------------------------------------------------- download
 
+def decode(raw: bytes, header_charset: str | None) -> str:
+    """Decode a page: charset from the HTTP header, else from the page's own
+    <meta> tag, else UTF-8, else Windows-1251 (common on Bulgarian sites)."""
+    candidates = []
+    if header_charset and header_charset.lower() != "iso-8859-1":
+        candidates.append(header_charset)
+    m = re.search(rb"charset\s*=\s*[\"']?([A-Za-z0-9_-]+)", raw[:4000])
+    if m:
+        candidates.append(m.group(1).decode("ascii"))
+    candidates += ["utf-8", "windows-1251"]
+    for enc in candidates:
+        try:
+            return raw.decode(enc)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def fetch_html(name: str, url: str, offline: Path | None) -> str:
     if offline:
-        return (offline / f"{name}.html").read_text(encoding="utf-8")
+        return decode((offline / f"{name}.html").read_bytes(), None)
     # meteo.bg answers these pages with HTTP 404 but a full page, so the
     # status code is not checked; the parsers check that a table is there.
     r = requests.get(url, headers=HEADERS, timeout=60)
-    r.encoding = r.apparent_encoding if r.encoding in (None, "ISO-8859-1") else r.encoding
-    return r.text
+    m = re.search(r"charset=([\w-]+)", r.headers.get("Content-Type", ""))
+    print(f"{name}: HTTP {r.status_code}, {len(r.content)} bytes, {r.headers.get('Content-Type')}")
+    return decode(r.content, m.group(1) if m else None)
 
 
 def fetch_map(n: int) -> bytes | None:
@@ -150,30 +169,36 @@ def num(s: str) -> float | None:
         return None
 
 
+TAG_RE = re.compile(r"<[^>]+>")
+CELL_RE = re.compile(r"<t[dh]\b[^>]*>(.*?)(?=<t[dh]\b|</tr|$)", re.S | re.I)
+
+
+def clean(fragment: str) -> str:
+    text = TAG_RE.sub(" ", fragment).replace("&nbsp;", " ").replace("&minus;", "-")
+    return " ".join(text.split())
+
+
 def parse_stringmeteo(html: str) -> dict[str, dict[int, list[float | None]]]:
     """Parse Stringmeteo's monthly extremes page.
 
     Returns {station: {day: [tmin, tmax]}}. Each station has a "Макс." row and
     a "Мин." row; each row holds days 1-15, then the label again and days
-    16-31, then the label again and the monthly summary.
+    16-31, then the label again and the monthly summary. The page is split on
+    "<tr" directly, so it does not matter whether its tags are closed properly.
     """
-    soup = BeautifulSoup(html, "html.parser")
     out: dict[str, dict[int, list[float | None]]] = {}
     station = None
-    for tr in soup.find_all("tr"):
-        if tr.find("table"):
-            continue  # layout rows that wrap other tables
-        tds = tr.find_all(["td", "th"])
-        texts = [" ".join(c.get_text(" ", strip=True).split()) for c in tds]
-        labels = [i for i, t in enumerate(texts) if t in ("Макс.", "Мин.")]
+    for chunk in re.split(r"<tr\b", html, flags=re.I)[1:]:
+        texts = [clean(c) for c in CELL_RE.findall(chunk)]
+        labels = [i for i, t in enumerate(texts) if t.startswith(("Макс", "Мин"))]
         if not labels:
             continue
         i0 = labels[0]
-        if i0 >= 1 and not re.fullmatch(r"\[\d+\]", texts[i0 - 1]):
+        if i0 >= 1 and texts[i0 - 1] and not re.fullmatch(r"\[?\d+\]?\.?", texts[i0 - 1]):
             station = texts[i0 - 1]
         if station is None:
             continue
-        k = 1 if texts[i0] == "Макс." else 0
+        k = 1 if texts[i0].startswith("Макс") else 0
         days = out.setdefault(station, {})
         block1 = texts[i0 + 1:i0 + 16]
         block2 = texts[labels[1] + 1:labels[2]] if len(labels) >= 3 else []
@@ -182,7 +207,12 @@ def parse_stringmeteo(html: str) -> dict[str, dict[int, list[float | None]]]:
             if v is not None:
                 days.setdefault(day, [None, None])[k] = v
     if not out:
-        raise ValueError("no station rows found on the Stringmeteo page")
+        visible = clean(html)
+        raise ValueError(
+            "no station rows found on the Stringmeteo page "
+            f"({len(html)} characters, {html.lower().count('<tr')} rows, "
+            f"'Макс' appears {html.count('Макс')} times). Page starts with: {visible[:300]!r}"
+        )
     return out
 
 
@@ -316,6 +346,7 @@ def main() -> int:
 
     days = load_days()
     ok = capture_forecasts(today, now, days, args.offline)
+    save_days(days)
     fill_observations(today, days, args.offline)
     save_days(days)
     if not ok:
