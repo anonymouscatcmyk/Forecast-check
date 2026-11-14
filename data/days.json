@@ -1026,3 +1026,13 @@
   "o": {}
  }
 ]
+{
+  "d": "2026-11-13",
+  "iss": "2026-11-12",
+  "lead": 1,
+  "src": "manual",
+  "cap": "seeded to fetch observations",
+  "capEn": "seeded to fetch observations",
+  "f": {},
+  "o": {}
+}
