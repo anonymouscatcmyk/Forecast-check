@@ -330,9 +330,19 @@ def short_date(d: dt.date, lang: str) -> str:
 
 def capture_forecasts(today: dt.date, now: dt.datetime, days: list[dict], offline: Path | None) -> bool:
     tables = {}
+    waits = [60, 60, 60, 1800, 1800, 1800, 1800]  # seconds between the 8 attempts
     for name, url in URLS.items():
-        html = fetch_html(name, url, offline)
-        tables[name] = parse_forecast_table(html)
+        for attempt in range(1, len(waits) + 2):
+            html = fetch_html(name, url, offline)
+            try:
+                tables[name] = parse_forecast_table(html)
+                break
+            except ValueError:
+                if offline or attempt > len(waits):
+                    raise
+                wait = waits[attempt - 1]
+                print(f"{name}: no forecast table (attempt {attempt}), retrying in {wait // 60} min")
+                time.sleep(wait)
         if not offline:
             raw = ARCHIVE / "raw" / today.isoformat()
             raw.mkdir(parents=True, exist_ok=True)
