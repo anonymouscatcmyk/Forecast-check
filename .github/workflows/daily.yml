@@ -19,7 +19,7 @@ concurrency:
 jobs:
   capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 150
     steps:
       - name: Is this the 13:30 Sofia run?
         id: when
