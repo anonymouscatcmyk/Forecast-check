@@ -2,11 +2,13 @@ name: Daily NIMH forecast capture
 
 on:
   schedule:
-    # Runs at 13:30 Sofia time all year. GitHub schedules are in UTC, so there
-    # are two entries and the first step keeps only the one that matches the
-    # current Sofia clock (winter UTC+2, summer UTC+3).
-    - cron: "30 11 * * *"   # 13:30 in winter
-    - cron: "30 10 * * *"   # 13:30 in summer
+    # GitHub schedules are in UTC and often start late. Three entries cover
+    # 13:30 Sofia time in both winter (UTC+2) and summer (UTC+3), plus a backup.
+    # The first step lets a run through only after 13:20 Sofia time, and
+    # collect.py keeps the first capture of the day, so extra runs change nothing.
+    - cron: "30 10 * * *"   # 13:30 in summer (12:30 in winter: too early, skipped)
+    - cron: "30 11 * * *"   # 13:30 in winter (backup in summer)
+    - cron: "30 12 * * *"   # backup
   workflow_dispatch: {}     # adds a "Run workflow" button on the Actions tab
 
 permissions:
@@ -21,16 +23,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
-      - name: Is this the 13:30 Sofia run?
+      - name: Is it after 13:20 in Sofia?
         id: when
         run: |
-          offset=$(TZ=Europe/Sofia date +%z)   # +0200 in winter, +0300 in summer
+          now=$(TZ=Europe/Sofia date +%H%M)
           run=no
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then run=yes; fi
-          if [ "${{ github.event.schedule }}" = "30 11 * * *" ] && [ "$offset" = "+0200" ]; then run=yes; fi
-          if [ "${{ github.event.schedule }}" = "30 10 * * *" ] && [ "$offset" = "+0300" ]; then run=yes; fi
+          if [ "$((10#$now))" -ge 1320 ]; then run=yes; fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
-          echo "Sofia offset $offset, run=$run"
+          echo "Sofia time $now, run=$run"
 
       - uses: actions/checkout@v4
         if: steps.when.outputs.run == 'yes'
