@@ -1,21 +1,25 @@
 """Daily collector of NIMH next-day temperature forecasts and observations.
 
-Run once a day at about 13:30 Sofia time (GitHub Actions does this, see
-.github/workflows/daily.yml). Each run:
+GitHub Actions runs it twice a day (see .github/workflows/daily.yml):
 
-1. Downloads NIMH's forecasts from meteo.bg (city table, mountain table,
-   seaside table) and archives the raw HTML and the forecast map images.
-2. Adds the forecast for tomorrow to data/days.json and data/forecasts.csv.
-   Only the next-day forecast is collected and checked.
-3. Downloads Stringmeteo's monthly extremes and fills in the observations
-   for every past day in data/days.json that still has none.
+* about 05:00 Sofia time, with --only observations: downloads Stringmeteo's
+  monthly extremes and fills in the observations for every past day in
+  data/days.json that still has none (normally yesterday).
+* about 13:30 Sofia time, with no option: downloads NIMH's forecasts from
+  meteo.bg (city table, mountain table, seaside table), archives the raw HTML
+  and the forecast map image, and adds the forecast for tomorrow to
+  data/days.json and data/forecasts.csv. Only the next-day forecast is
+  collected and checked. It then also looks for observations that are still
+  missing, so a failed morning run is made up for in the afternoon.
 
 Everything is idempotent: running it twice on the same day changes nothing.
 
 Usage:
-    python scripts/collect.py                 # normal daily run
+    python scripts/collect.py                       # forecasts, then missing observations
+    python scripts/collect.py --only observations   # morning run
+    python scripts/collect.py --only forecasts
     python scripts/collect.py --offline tests/fixtures --today 2026-11-08
-                                              # test with saved pages
+                                                    # test with saved pages
 """
 from __future__ import annotations
 
@@ -329,6 +333,11 @@ def short_date(d: dt.date, lang: str) -> str:
 # ---------------------------------------------------------------- steps
 
 def capture_forecasts(today: dt.date, now: dt.datetime, days: list[dict], offline: Path | None) -> bool:
+    if all(any(e["iss"] == today.isoformat() and e["lead"] == n for e in days) for n in LEADS):
+        # Keep the first capture of the day: a backup run must not replace the
+        # archived pages and map or add the same rows to forecasts.csv again.
+        print(f"forecast issued {today} already captured; nothing to do")
+        return True
     tables = {}
     waits = [60, 60, 60, 1800, 1800, 1800, 1800]  # seconds between the 8 attempts
     for name, url in URLS.items():
@@ -431,6 +440,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--offline", type=Path, help="read saved pages from this folder instead of the web")
     ap.add_argument("--today", help="pretend today is this date (YYYY-MM-DD)")
+    ap.add_argument("--only", choices=["forecasts", "observations"],
+                    help="do just this part (default: forecasts, then missing observations)")
     args = ap.parse_args()
 
     now = dt.datetime.now(TZ)
@@ -438,13 +449,22 @@ def main() -> int:
     DATA.mkdir(exist_ok=True)
 
     days = load_days()
-    ok = capture_forecasts(today, now, days, args.offline)
-    save_days(days)
-    fill_observations(today, days, args.offline)
-    save_days(days)
-    if not ok:
-        print("Forecasts not captured on this run; the later run today will try again.")
-    return 0  # real errors (site down, layout changed) raise and fail the run
+    error = None
+    if args.only != "observations":
+        # A failure here must not stop the observations below from being collected.
+        try:
+            if not capture_forecasts(today, now, days, args.offline):
+                print("Forecasts not captured on this run; the later run today will try again.")
+        except Exception as exc:  # noqa: BLE001 - reported after the observations step
+            error = exc
+            print(f"Forecast capture failed: {exc!r}")
+        save_days(days)
+    if args.only != "forecasts":
+        fill_observations(today, days, args.offline)
+        save_days(days)
+    if error:
+        raise error  # real errors (site down, layout changed) still fail the run
+    return 0
 
 
 if __name__ == "__main__":
