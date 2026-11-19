@@ -7,16 +7,22 @@ Runs on GitHub Actions.
 It is planned to show this information on a web page in the future; this
 README will be updated when that happens.
 
-## What it does each day (13:30 Sofia time)
+## What it does each day
+
+**About 05:00 Sofia time – observations.** Reads Stringmeteo's monthly extremes and
+fills in the observations for every past day that has none yet, normally yesterday
+(it waits until at least 80 % of stations have both values).
+
+**About 13:30 Sofia time – forecasts.**
 
 1. Reads three tables on meteo.bg:
    - **Прогноза по градове** (`/bg/forecast/gradove`): min/max by town.
    - **В планините** (`/bg/forecast/planini`) and **По Черноморието** (`/bg/forecast/moreto`).
 2. Adds tomorrow's forecast to `data/days.json`. Only the next-day forecast is collected.
-3. Reads Stringmeteo's monthly extremes and fills in the observations for every past
-   day that has none yet (it waits until at least 80 % of stations have both values).
-4. Archives the raw pages (`archive/raw/<date>/`) and the forecast map image
+3. Archives the raw pages (`archive/raw/<date>/`) and the forecast map image
    (`archive/maps/<date>_PrognozaBG_1.png`) so every value can be checked later.
+4. Looks again for observations that are still missing, so a failed morning run is
+   made up for in the afternoon.
 
 Output files:
 
