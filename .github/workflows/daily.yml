@@ -2,14 +2,28 @@ name: Daily NIMH forecast capture
 
 on:
   schedule:
-    # GitHub schedules are in UTC and often start late. Three entries cover
-    # 13:30 Sofia time in both winter (UTC+2) and summer (UTC+3), plus a backup.
-    # The first step lets a run through only after 13:20 Sofia time, and
-    # collect.py keeps the first capture of the day, so extra runs change nothing.
-    - cron: "30 10 * * *"   # 13:30 in summer (12:30 in winter: too early, skipped)
+    # GitHub schedules are in UTC and often start late, so each Sofia time has
+    # an entry for winter (UTC+2), one for summer (UTC+3) and a backup. The
+    # first step looks at the Sofia clock and decides what the run does:
+    #   before 05:00          nothing
+    #   05:00 to 13:29        observations only (Stringmeteo, for yesterday)
+    #   13:30 or later        forecasts for tomorrow + any observations still missing
+    # collect.py changes nothing when the data is already there, so extra runs are harmless.
+    - cron: "0 2 * * *"     # 05:00 in summer (04:00 in winter: too early, skipped)
+    - cron: "0 3 * * *"     # 05:00 in winter (backup in summer)
+    - cron: "0 4 * * *"     # backup
+    - cron: "30 10 * * *"   # 13:30 in summer (12:30 in winter: observations only)
     - cron: "30 11 * * *"   # 13:30 in winter (backup in summer)
     - cron: "30 12 * * *"   # backup
-  workflow_dispatch: {}     # adds a "Run workflow" button on the Actions tab
+  workflow_dispatch:        # adds a "Run workflow" button on the Actions tab
+    inputs:
+      what:
+        description: "What to collect"
+        type: choice
+        default: forecasts and observations
+        options:
+          - forecasts and observations
+          - observations only
 
 permissions:
   contents: write           # lets the job commit the new data back to the repository
@@ -23,38 +37,46 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
-      - name: Is it after 13:20 in Sofia?
+      - name: What should this run do?
         id: when
         run: |
           now=$(TZ=Europe/Sofia date +%H%M)
-          run=no
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then run=yes; fi
-          if [ "$((10#$now))" -ge 1320 ]; then run=yes; fi
-          echo "run=$run" >> "$GITHUB_OUTPUT"
-          echo "Sofia time $now, run=$run"
+          mode=skip
+          if [ "$((10#$now))" -ge 500 ]; then mode=observations; fi
+          if [ "$((10#$now))" -ge 1330 ]; then mode=all; fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            mode=all
+            if [ "${{ inputs.what }}" = "observations only" ]; then mode=observations; fi
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Sofia time $now, mode=$mode"
 
       - uses: actions/checkout@v4
-        if: steps.when.outputs.run == 'yes'
+        if: steps.when.outputs.mode != 'skip'
 
       - uses: actions/setup-python@v5
-        if: steps.when.outputs.run == 'yes'
+        if: steps.when.outputs.mode != 'skip'
         with:
           python-version: "3.12"
 
       - name: Install packages
-        if: steps.when.outputs.run == 'yes'
+        if: steps.when.outputs.mode != 'skip'
         run: pip install -r requirements.txt pytest
 
       - name: Check the parsers on the saved pages
-        if: steps.when.outputs.run == 'yes'
+        if: steps.when.outputs.mode != 'skip'
         run: python -m pytest -q tests
 
-      - name: Collect forecasts and observations
-        if: steps.when.outputs.run == 'yes'
+      - name: Collect observations (morning run)
+        if: steps.when.outputs.mode == 'observations'
+        run: python scripts/collect.py --only observations
+
+      - name: Collect forecasts and missing observations (13:30 run)
+        if: steps.when.outputs.mode == 'all'
         run: python scripts/collect.py
 
       - name: Save the results to the repository
-        if: steps.when.outputs.run == 'yes'
+        if: always() && steps.when.outputs.mode != 'skip'
         run: |
           git config user.name "forecast-bot"
           git config user.email "forecast-bot@users.noreply.github.com"
