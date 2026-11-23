@@ -175,7 +175,23 @@ def fetch_html(name: str, url: str, offline: Path | None) -> str:
         return decode((offline / f"{name}.html").read_bytes(), None)
 
     session = get_session()
-    r = session.get(url, timeout=60, allow_redirects=True)
+    # meteo.bg is sometimes slow or briefly answers with an error page (seen 23 Nov 2026:
+    # HTTP 404, then a 60 s timeout). Try its pages up to 3 times, about a minute apart,
+    # before giving up. A normal run is not slowed down: a good first answer is used at once.
+    attempts = 3 if "meteo.bg" in url else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            r = session.get(url, timeout=60, allow_redirects=True)
+        except requests.RequestException as e:
+            if attempt == attempts:
+                raise
+            print(f"{name}: attempt {attempt} failed ({type(e).__name__}), retrying in 60 s")
+            time.sleep(60)
+            continue
+        if r.status_code == 200 or attempt == attempts:
+            break
+        print(f"{name}: attempt {attempt} got HTTP {r.status_code}, retrying in 60 s")
+        time.sleep(60)
     html = decode(r.content, None)
 
     # Stringmeteo serves a SuperJS challenge to non-browser clients.
